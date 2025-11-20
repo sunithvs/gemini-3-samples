@@ -85,6 +85,14 @@
             animation: fadeIn 0.5s ease;
         }
         
+        .response-controls {
+            display: flex;
+            justify-content: flex-end;
+            margin-top: 0.5rem;
+            padding-top: 0.5rem;
+            border-top: 1px solid rgba(255,255,255,0.1);
+        }
+        
         .input-group {
             display: none;
             margin-top: 1rem;
@@ -128,12 +136,13 @@
         <div class="ui-card">
             <div class="ui-title">Sakura Sanctuary</div>
             <div class="ui-desc">
-                A place of digital peace.
+                A place of digital peace. Now inhabited by curious spirits.
             </div>
             
             <div class="btn-group">
                 <button class="control-btn" onclick="togglePetals()">🌸 Toggle Wind</button>
                 <button class="control-btn" onclick="generateHaiku()">✨ Compose Haiku</button>
+                <button class="control-btn" onclick="startMeditation()">🧘 Guided Meditation</button>
                 <button class="control-btn" onclick="toggleChat()">✨ Seek Wisdom</button>
             </div>
 
@@ -146,6 +155,9 @@
             <!-- AI Response Display -->
             <div id="response-area">
                 <p id="ai-text">The wind whispers through the trees...</p>
+                <div class="response-controls" id="audio-controls" style="display:none;">
+                    <button class="control-btn" id="play-audio-btn" style="font-size: 0.75rem;">🔊 Play Voice</button>
+                </div>
             </div>
         </div>
     </div>
@@ -154,67 +166,158 @@
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
 
-    <script>
+<script>
         // --- GEMINI API INTEGRATION ---
         const apiKey = ""; // Auto-filled by environment
 
-        async function callGemini(prompt, systemInstruction = "") {
-            if (!apiKey) {
-                alert("API Key is missing!");
-                return null;
-            }
-
+        // --- TEXT GENERATION ---
+        async function callGeminiText(prompt, systemInstruction = "") {
+            if (!apiKey) { alert("API Key is missing!"); return null; }
             const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`;
-            
             const payload = {
                 contents: [{ parts: [{ text: prompt }] }],
                 systemInstruction: { parts: [{ text: systemInstruction }] }
             };
-
             try {
                 const response = await fetch(url, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(payload)
+                    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
                 });
-
                 if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
                 const data = await response.json();
                 return data.candidates?.[0]?.content?.parts?.[0]?.text || "The spirits are silent...";
-            } catch (error) {
-                console.error("Gemini API Error:", error);
-                return "The connection to the spirit realm is weak (Error).";
+            } catch (error) { console.error("Gemini API Error:", error); return "Connection error."; }
+        }
+
+        // --- TEXT TO SPEECH ---
+        async function callGeminiTTS(text) {
+            if (!apiKey) return null;
+            const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key=${apiKey}`;
+            const payload = {
+                contents: [{ parts: [{ text: text }] }],
+                generationConfig: {
+                    responseModalities: ["AUDIO"],
+                    speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: "Fenrir" } } } // Deep, calm voice
+                }
+            };
+            try {
+                const response = await fetch(url, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
+                });
+                if (!response.ok) throw new Error(`HTTP TTS error! status: ${response.status}`);
+                const data = await response.json();
+                const base64Audio = data.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+                return base64Audio; // PCM 16-bit
+            } catch (error) { console.error("Gemini TTS Error:", error); return null; }
+        }
+
+        // --- AUDIO HELPERS (PCM to WAV) ---
+        function base64ToArrayBuffer(base64) {
+            const binaryString = window.atob(base64);
+            const len = binaryString.length;
+            const bytes = new Uint8Array(len);
+            for (let i = 0; i < len; i++) bytes[i] = binaryString.charCodeAt(i);
+            return bytes.buffer;
+        }
+
+        function pcmToWav(pcmData, sampleRate = 24000) {
+            const numChannels = 1;
+            const bitsPerSample = 16;
+            const byteRate = sampleRate * numChannels * bitsPerSample / 8;
+            const blockAlign = numChannels * bitsPerSample / 8;
+            const dataSize = pcmData.byteLength;
+            const headerSize = 44;
+            const totalSize = headerSize + dataSize;
+            const buffer = new ArrayBuffer(totalSize);
+            const view = new DataView(buffer);
+
+            // RIFF chunk
+            writeString(view, 0, 'RIFF'); view.setUint32(4, 36 + dataSize, true); writeString(view, 8, 'WAVE');
+            // fmt chunk
+            writeString(view, 12, 'fmt '); view.setUint32(16, 16, true); view.setUint16(20, 1, true);
+            view.setUint16(22, numChannels, true); view.setUint32(24, sampleRate, true);
+            view.setUint32(28, byteRate, true); view.setUint16(32, blockAlign, true); view.setUint16(34, bitsPerSample, true);
+            // data chunk
+            writeString(view, 36, 'data'); view.setUint32(40, dataSize, true);
+
+            const pcmBytes = new Uint8Array(pcmData);
+            const wavBytes = new Uint8Array(buffer, 44);
+            wavBytes.set(pcmBytes);
+            return new Blob([buffer], { type: 'audio/wav' });
+        }
+
+        function writeString(view, offset, string) {
+            for (let i = 0; i < string.length; i++) view.setUint8(offset + i, string.charCodeAt(i));
+        }
+
+        let currentAudio = null;
+
+        async function playAudio(base64PCM) {
+            if (!base64PCM) return;
+            if (currentAudio) { currentAudio.pause(); currentAudio = null; }
+            
+            const pcmBuffer = base64ToArrayBuffer(base64PCM);
+            const wavBlob = pcmToWav(pcmBuffer, 24000); // Default Gemini TTS rate
+            const audioUrl = URL.createObjectURL(wavBlob);
+            
+            currentAudio = new Audio(audioUrl);
+            currentAudio.play();
+        }
+
+        // --- FEATURE LOGIC ---
+
+        function showResponseArea(text, audioBase64 = null) {
+            const area = document.getElementById('response-area');
+            const textEl = document.getElementById('ai-text');
+            const audioCtrl = document.getElementById('audio-controls');
+            const playBtn = document.getElementById('play-audio-btn');
+            
+            area.style.display = 'block';
+            textEl.innerHTML = text.replace(/\n/g, '<br>');
+            
+            if (audioBase64) {
+                audioCtrl.style.display = 'flex';
+                playBtn.onclick = () => playAudio(audioBase64);
+            } else {
+                audioCtrl.style.display = 'none';
             }
         }
 
-        // --- AI Features UI Logic ---
-
-        function showResponseArea(text) {
+        function showLoading(msg = 'Consulting the spirits') {
             const area = document.getElementById('response-area');
             const textEl = document.getElementById('ai-text');
+            document.getElementById('audio-controls').style.display = 'none';
             area.style.display = 'block';
-            textEl.innerHTML = text.replace(/\n/g, '<br>');
-        }
-
-        function showLoading() {
-            const area = document.getElementById('response-area');
-            const textEl = document.getElementById('ai-text');
-            area.style.display = 'block';
-            textEl.innerHTML = 'Consulting the spirits <div class="ai-loading"></div>';
+            textEl.innerHTML = `${msg} <div class="ai-loading"></div>`;
         }
 
         async function generateHaiku() {
-            showLoading();
-            const systemPrompt = "You are a poetic AI. Write a single haiku about cherry blossoms, pagodas, water, or nature. Do not include a title or analysis. Just the three lines.";
-            const text = await callGemini("Write a haiku for this moment.", systemPrompt);
+            showLoading("Composing poetry");
+            const systemPrompt = "You are a poetic AI. Write a single haiku about cherry blossoms, pagodas, or nature. No title/analysis.";
+            const text = await callGeminiText("Write a haiku.", systemPrompt);
+            
+            // Prefetch audio for seamless experience
+            const audio = await callGeminiTTS(text);
+            showResponseArea(text, audio);
+        }
+
+        async function startMeditation() {
+            showLoading("Preparing meditation");
+            const systemPrompt = "You are a meditation guide. Write a very short (2-3 sentences), soothing guided meditation script focusing on the cherry blossoms, the water reflection, and the stillness of this shrine. Do not include instructions like 'close your eyes', focus on the visual scene.";
+            const text = await callGeminiText("Start the meditation.", systemPrompt);
+            
             showResponseArea(text);
+            // Generate and Auto-play for meditation
+            const audio = await callGeminiTTS(text);
+            if(audio) {
+                showResponseArea(text, audio);
+                playAudio(audio);
+            }
         }
 
         let chatVisible = false;
         function toggleChat() {
             chatVisible = !chatVisible;
-            const inputGroup = document.getElementById('input-group');
-            inputGroup.style.display = chatVisible ? 'flex' : 'none';
+            document.getElementById('input-group').style.display = chatVisible ? 'flex' : 'none';
             if (chatVisible) document.getElementById('user-query').focus();
         }
 
@@ -222,54 +325,41 @@
             const input = document.getElementById('user-query');
             const question = input.value.trim();
             if (!question) return;
-
             input.value = '';
-            showLoading();
             
-            const systemPrompt = "You are the ancient, wise Kami (spirit) of this Sakura Shrine. Answer the user's philosophical questions with profound, peaceful, and slightly archaic/poetic wisdom. Keep responses relatively short (under 3 sentences). Be soothing.";
-            const text = await callGemini(question, systemPrompt);
-            showResponseArea(text);
+            showLoading();
+            const systemPrompt = "You are the ancient Kami (spirit) of this Sakura Shrine. Answer briefly and wisely. Be soothing.";
+            const text = await callGeminiText(question, systemPrompt);
+            
+            const audio = await callGeminiTTS(text);
+            showResponseArea(text, audio);
         }
 
-
-        // --- 3D SCENE LOGIC (Existing) ---
-
-        // Configuration
+        // --- 3D SCENE LOGIC ---
+        
         const CONFIG = {
             colors: {
-                skyTop: 0x87CEEB,
-                skyBottom: 0xFFC0CB,
-                fog: 0xffdbe6, // Pinkish fog
-                water: 0x4a6b8a,
-                woodDark: 0x3d2817,
-                woodRed: 0x8a3324,
-                roof: 0x2c3e50, // Dark blue/grey
-                roofHighlight: 0x4a6b8a,
-                sakura: 0xffb7c5,
-                sakuraDark: 0xffa7b5
+                skyTop: 0x87CEEB, skyBottom: 0xFFC0CB, fog: 0xffdbe6, water: 0x4a6b8a,
+                woodDark: 0x3d2817, woodRed: 0x8a3324, roof: 0x2c3e50, sakura: 0xffb7c5, sakuraDark: 0xffa7b5,
+                alienBody: 0x98fb98, alienEye: 0x000000
             },
             particles: 3000
         };
 
-        let scene, camera, renderer, controls;
-        let particles, particleSystem;
-        let waterMesh;
-        let clock = new THREE.Clock();
+        let scene, camera, renderer, controls, particleSystem, clock = new THREE.Clock();
         let windSpeed = 1.0;
+        let aliens = []; 
+        let doors = []; 
+        let obstacles = []; // New: For collision detection
 
         function init() {
-            // 1. Scene Setup
             scene = new THREE.Scene();
-            
-            // Fog for atmospheric depth (Soft pink/white)
             scene.fog = new THREE.FogExp2(CONFIG.colors.fog, 0.015);
             scene.background = new THREE.Color(CONFIG.colors.fog);
 
-            // 2. Camera
             camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
             camera.position.set(25, 12, 35);
 
-            // 3. Renderer
             renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
             renderer.setSize(window.innerWidth, window.innerHeight);
             renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -277,40 +367,33 @@
             renderer.shadowMap.type = THREE.PCFSoftShadowMap;
             document.getElementById('canvas-container').appendChild(renderer.domElement);
 
-            // 4. Controls
             controls = new THREE.OrbitControls(camera, renderer.domElement);
             controls.enableDamping = true;
             controls.dampingFactor = 0.05;
-            controls.maxPolarAngle = Math.PI / 2 - 0.05; // Don't go below ground
+            controls.maxPolarAngle = Math.PI / 2 - 0.05;
             controls.minDistance = 5;
             controls.maxDistance = 80;
             controls.target.set(0, 5, 0);
 
-            // 5. Lighting
             setupLighting();
-
-            // 6. Objects
             createWater();
-            createPagoda();
+            createPagoda(); // Creates doors now
             createSubHouses();
             createEnvironment();
             createSakuraParticles();
+            createAliens();
 
-            // 7. Event Listeners
+            // Add main pagoda base to obstacles
+            obstacles.push({ x: 0, z: 0, r: 8 }); 
+
             window.addEventListener('resize', onWindowResize, false);
-            
-            // Remove loading text
             document.getElementById('loading').style.opacity = 0;
-            
             animate();
         }
 
         function setupLighting() {
-            // Soft ambient light
             const ambientLight = new THREE.AmbientLight(0xffe6ea, 0.6);
             scene.add(ambientLight);
-
-            // Sun light
             const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
             dirLight.position.set(10, 30, 10);
             dirLight.castShadow = true;
@@ -323,411 +406,502 @@
             dirLight.shadow.camera.top = 40;
             dirLight.shadow.camera.bottom = -40;
             scene.add(dirLight);
-
-            // Rim light for the anime aesthetic
             const hemiLight = new THREE.HemisphereLight(0x87CEEB, 0xFFC0CB, 0.4);
             scene.add(hemiLight);
         }
 
-        // --- Helper: Curved Roof Geometry ---
         function createCurvedRoofGeo(width, height, segments = 4) {
             const points = [];
-            // Create a swooping curve profile
             for (let i = 0; i <= 10; i++) {
                 const t = i / 10;
-                const x = width * t;
-                // Exponential curve for the Japanese roof style
-                const y = height * (1 - Math.pow(t, 2)); 
-                points.push(new THREE.Vector2(x, y));
+                points.push(new THREE.Vector2(width * t, height * (1 - Math.pow(t, 2))));
             }
-            // Use LatheGeometry to spin this curve
-            const geometry = new THREE.LatheGeometry(points, segments);
-            return geometry;
+            return new THREE.LatheGeometry(points, segments);
         }
-
-        // --- Procedural Object Creation ---
 
         function createPagoda() {
             const pagodaGroup = new THREE.Group();
-
-            // Materials
             const woodMat = new THREE.MeshStandardMaterial({ color: CONFIG.colors.woodRed, roughness: 0.8 });
             const darkWoodMat = new THREE.MeshStandardMaterial({ color: CONFIG.colors.woodDark, roughness: 0.9 });
-            const roofMat = new THREE.MeshStandardMaterial({ 
-                color: CONFIG.colors.roof, 
-                roughness: 0.6,
-                flatShading: true,
-                side: THREE.DoubleSide
-            });
+            const roofMat = new THREE.MeshStandardMaterial({ color: CONFIG.colors.roof, roughness: 0.6, flatShading: true, side: THREE.DoubleSide });
             const whiteWallMat = new THREE.MeshStandardMaterial({ color: 0xffffff });
 
-            // Base Platform
-            const baseGeo = new THREE.BoxGeometry(12, 4, 12);
-            const base = new THREE.Mesh(baseGeo, new THREE.MeshStandardMaterial({ color: 0x555555 }));
-            base.position.y = 0;
-            base.receiveShadow = true;
-            pagodaGroup.add(base);
+            const base = new THREE.Mesh(new THREE.BoxGeometry(12, 4, 12), new THREE.MeshStandardMaterial({ color: 0x555555 }));
+            base.position.y = 0; base.receiveShadow = true; pagodaGroup.add(base);
 
-            // Tiers
-            const tiers = 3;
-            let currentY = 2;
-            let width = 7;
-
-            for (let i = 0; i < tiers; i++) {
-                // 1. Wall Core
+            let currentY = 2; let width = 7;
+            for (let i = 0; i < 3; i++) {
                 const wallHeight = 3.5;
-                const wallGeo = new THREE.BoxGeometry(width * 0.7, wallHeight, width * 0.7);
-                const wall = new THREE.Mesh(wallGeo, whiteWallMat);
-                wall.position.y = currentY + wallHeight / 2;
-                wall.castShadow = true;
-                wall.receiveShadow = true;
-                pagodaGroup.add(wall);
+                const wallWidth = width * 0.7;
+                
+                if (i === 0) {
+                    const sideWallGeo = new THREE.BoxGeometry(wallWidth, wallHeight, 0.2);
+                    const w1 = new THREE.Mesh(sideWallGeo, whiteWallMat); w1.position.set(0, currentY+wallHeight/2, wallWidth/2);
+                    const w2 = new THREE.Mesh(sideWallGeo, whiteWallMat); w2.position.set(0, currentY+wallHeight/2, -wallWidth/2);
+                    pagodaGroup.add(w1); pagodaGroup.add(w2);
 
-                // 2. Pillars (Corners)
-                const pillarGeo = new THREE.BoxGeometry(0.4, wallHeight, 0.4);
-                const positions = [
-                    {x: 1, z: 1}, {x: -1, z: 1}, {x: 1, z: -1}, {x: -1, z: -1}
-                ];
-                const wOffset = (width * 0.7) / 2 + 0.1;
-                
-                positions.forEach(pos => {
-                    const pillar = new THREE.Mesh(pillarGeo, woodMat);
-                    pillar.position.set(pos.x * wOffset, currentY + wallHeight/2, pos.z * wOffset);
-                    pagodaGroup.add(pillar);
-                });
+                    const gapSize = 2.0;
+                    const pieceWidth = (wallWidth - gapSize) / 2;
+                    const frontGeo = new THREE.BoxGeometry(0.2, wallHeight, pieceWidth);
+                    
+                    const f1 = new THREE.Mesh(frontGeo, whiteWallMat); f1.position.set(wallWidth/2, currentY+wallHeight/2, pieceWidth/2 + gapSize/2);
+                    const f2 = new THREE.Mesh(frontGeo, whiteWallMat); f2.position.set(wallWidth/2, currentY+wallHeight/2, -(pieceWidth/2 + gapSize/2));
+                    const b1 = new THREE.Mesh(frontGeo, whiteWallMat); b1.position.set(-wallWidth/2, currentY+wallHeight/2, pieceWidth/2 + gapSize/2);
+                    const b2 = new THREE.Mesh(frontGeo, whiteWallMat); b2.position.set(-wallWidth/2, currentY+wallHeight/2, -(pieceWidth/2 + gapSize/2));
+                    
+                    pagodaGroup.add(f1); pagodaGroup.add(f2); pagodaGroup.add(b1); pagodaGroup.add(b2);
+                    
+                    const lintelGeo = new THREE.BoxGeometry(0.2, 1.0, gapSize);
+                    const fl = new THREE.Mesh(lintelGeo, whiteWallMat); fl.position.set(wallWidth/2, currentY+wallHeight - 0.5, 0);
+                    const bl = new THREE.Mesh(lintelGeo, whiteWallMat); bl.position.set(-wallWidth/2, currentY+wallHeight - 0.5, 0);
+                    pagodaGroup.add(fl); pagodaGroup.add(bl);
 
-                // 3. Curved Roof
-                const roofHeight = 2.5;
-                const roofWidth = width + 2.5; // Overhang
-                
-                // Use LatheGeometry for curve
-                const roofGeo = createCurvedRoofGeo(roofWidth * 0.7, roofHeight, 4);
-                const roof = new THREE.Mesh(roofGeo, roofMat);
-                
-                // Lathe creates round, we need square for pagoda but with curved slope
-                // Standard Lathe is round. To make it square-ish with 4 segments:
-                // We already set segments=4 in helper. Now rotate to align corners.
-                roof.rotation.y = Math.PI / 4; 
-                roof.position.y = currentY + wallHeight;
-                roof.castShadow = true;
-                pagodaGroup.add(roof);
+                    createDoor(pagodaGroup, wallWidth/2, currentY, 0, 0); 
+                    createDoor(pagodaGroup, -wallWidth/2, currentY, 0, Math.PI); 
 
-                // Roof Spire/Finial on top of roof if needed, but mainly the main spire
-                
-                // Balcony Railing for non-top floors
-                if (i < tiers) {
-                    const railGeo = new THREE.BoxGeometry(width, 0.2, width);
-                    const rail = new THREE.Mesh(railGeo, darkWoodMat);
-                    rail.position.y = currentY;
-                    pagodaGroup.add(rail);
+                } else {
+                    const wall = new THREE.Mesh(new THREE.BoxGeometry(wallWidth, wallHeight, wallWidth), whiteWallMat);
+                    wall.position.y = currentY + wallHeight / 2; wall.castShadow = true; wall.receiveShadow = true; pagodaGroup.add(wall);
                 }
 
-                // Update height for next tier
-                currentY += wallHeight + roofHeight - 1.2; // overlap
-                width *= 0.75; // Taper
+                const pillarGeo = new THREE.BoxGeometry(0.4, wallHeight, 0.4);
+                const wOffset = (width * 0.7) / 2 + 0.1;
+                [{x: 1, z: 1}, {x: -1, z: 1}, {x: 1, z: -1}, {x: -1, z: -1}].forEach(pos => {
+                    const pillar = new THREE.Mesh(pillarGeo, woodMat);
+                    pillar.position.set(pos.x * wOffset, currentY + wallHeight/2, pos.z * wOffset); pagodaGroup.add(pillar);
+                });
+
+                const roofHeight = 2.5; const roofWidth = width + 2.5;
+                const roof = new THREE.Mesh(createCurvedRoofGeo(roofWidth * 0.7, roofHeight, 4), roofMat);
+                roof.rotation.y = Math.PI / 4; roof.position.y = currentY + wallHeight; roof.castShadow = true; pagodaGroup.add(roof);
+
+                if (i < 3) {
+                    const rail = new THREE.Mesh(new THREE.BoxGeometry(width, 0.2, width), darkWoodMat);
+                    rail.position.y = currentY; pagodaGroup.add(rail);
+                }
+                currentY += wallHeight + roofHeight - 1.2; width *= 0.75;
             }
-
-            // Spire (Sorin)
-            const spireHeight = 5;
-            const spireGeo = new THREE.CylinderGeometry(0.1, 0.3, spireHeight, 8);
-            const spire = new THREE.Mesh(spireGeo, new THREE.MeshStandardMaterial({ color: 0x333333, metalness: 0.6 }));
-            spire.position.y = currentY + spireHeight/2 - 1;
-            pagodaGroup.add(spire);
-
-            // Rings on spire
-            for(let j=0; j<5; j++) {
-                const ringGeo = new THREE.TorusGeometry(0.4 - (j*0.05), 0.05, 8, 16);
-                const ring = new THREE.Mesh(ringGeo, new THREE.MeshStandardMaterial({ color: 0xD4AF37 })); // Gold
-                ring.rotation.x = Math.PI/2;
-                ring.position.y = currentY + 0.5 + (j * 0.6);
-                pagodaGroup.add(ring);
-            }
-
+            
+            const spire = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.3, 5, 8), new THREE.MeshStandardMaterial({ color: 0x333333 }));
+            spire.position.y = currentY + 1.5; pagodaGroup.add(spire);
             scene.add(pagodaGroup);
+        }
+
+        function createDoor(parentGroup, x, y, z, rotationY) {
+            const doorH = 2.5;
+            const doorW = 0.9; 
+            const doorThick = 0.1;
+
+            const doorMat = new THREE.MeshStandardMaterial({ color: 0xDba279, roughness: 0.7 }); 
+            const frameMat = new THREE.MeshStandardMaterial({ color: CONFIG.colors.woodDark });
+
+            const doorGroup = new THREE.Group();
+            doorGroup.position.set(x, y + doorH/2, z);
+            doorGroup.rotation.y = rotationY;
+
+            const createPanel = (offsetX) => {
+                const panel = new THREE.Group();
+                const frame = new THREE.Mesh(new THREE.BoxGeometry(doorThick, doorH, doorW), frameMat);
+                const paper = new THREE.Mesh(new THREE.BoxGeometry(doorThick/2, doorH-0.2, doorW-0.2), doorMat);
+                panel.add(frame);
+                panel.add(paper);
+                panel.position.z = offsetX;
+                return panel;
+            };
+
+            const leftPanel = createPanel(doorW/2);
+            const rightPanel = createPanel(-doorW/2);
+
+            doorGroup.add(leftPanel);
+            doorGroup.add(rightPanel);
+            parentGroup.add(doorGroup);
+
+            const facingDir = new THREE.Vector3(1,0,0).applyAxisAngle(new THREE.Vector3(0,1,0), rotationY);
+            // Jump Spot: On the ground, slightly away from the building
+            const jumpSpotPos = new THREE.Vector3(x, 0, z).add(facingDir.clone().multiplyScalar(4)); 
+            // Landing Spot: On the platform, right in front of door
+            const platformSpotPos = new THREE.Vector3(x, 2, z).add(facingDir.clone().multiplyScalar(1.0)); 
+            // Inside Spot
+            const insidePos = new THREE.Vector3(x, 2, z).add(facingDir.clone().multiplyScalar(-2.0)); 
+
+            doors.push({
+                id: doors.length,
+                group: doorGroup,
+                left: leftPanel,
+                right: rightPanel,
+                jumpSpotPos: jumpSpotPos,
+                platformSpotPos: platformSpotPos,
+                insidePos: insidePos,
+                requests: 0,
+                openFactor: 0
+            });
         }
 
         function createSubHouses() {
             const createHouse = (x, z, rotation) => {
                 const house = new THREE.Group();
+                house.add(new THREE.Mesh(new THREE.BoxGeometry(5, 1, 5), new THREE.MeshStandardMaterial({ color: 0x555555 })));
+                const walls = new THREE.Mesh(new THREE.BoxGeometry(4, 3, 4), new THREE.MeshStandardMaterial({ color: 0xffffff }));
+                walls.position.y = 2; walls.castShadow = true; house.add(walls);
                 
-                // Base
-                const base = new THREE.Mesh(
-                    new THREE.BoxGeometry(5, 1, 5),
-                    new THREE.MeshStandardMaterial({ color: 0x555555 })
-                );
-                house.add(base);
+                const roof = new THREE.Mesh(createCurvedRoofGeo(3.5, 2.5, 4), new THREE.MeshStandardMaterial({ color: CONFIG.colors.roof, side: THREE.DoubleSide }));
+                roof.rotation.y = Math.PI / 4; roof.position.y = 3.5; roof.castShadow = true; house.add(roof);
 
-                // Walls
-                const walls = new THREE.Mesh(
-                    new THREE.BoxGeometry(4, 3, 4),
-                    new THREE.MeshStandardMaterial({ color: 0xffffff })
-                );
-                walls.position.y = 2;
-                walls.castShadow = true;
-                house.add(walls);
-
-                // Wood pillars
-                const pGeo = new THREE.BoxGeometry(0.3, 3, 0.3);
-                const pMat = new THREE.MeshStandardMaterial({ color: CONFIG.colors.woodRed });
-                const positions = [{x:1.9, z:1.9}, {x:-1.9, z:1.9}, {x:1.9, z:-1.9}, {x:-1.9, z:-1.9}];
-                positions.forEach(p => {
-                    const m = new THREE.Mesh(pGeo, pMat);
-                    m.position.set(p.x, 2, p.z);
-                    house.add(m);
-                });
-
-                // Curved Roof
-                const roofGeo = createCurvedRoofGeo(3.5, 2.5, 4);
-                const roof = new THREE.Mesh(
-                    roofGeo, 
-                    new THREE.MeshStandardMaterial({ color: CONFIG.colors.roof, side: THREE.DoubleSide, roughness: 0.6 })
-                );
-                roof.rotation.y = Math.PI / 4;
-                roof.position.y = 3.5;
-                roof.castShadow = true;
-                house.add(roof);
-
-                house.position.set(x, 1, z);
-                house.rotation.y = rotation;
-                scene.add(house);
+                house.position.set(x, 1, z); house.rotation.y = rotation; scene.add(house);
+                
+                // Add collision for sub houses
+                obstacles.push({ x: x, z: z, r: 4 });
             };
-
-            // Place sub-houses symmetrically
-            createHouse(12, 5, -Math.PI / 4);
-            createHouse(-12, 5, Math.PI / 4);
-            createHouse(12, -5, -Math.PI * 0.75);
-            createHouse(-12, -5, Math.PI * 0.75);
+            createHouse(12, 5, -Math.PI / 4); createHouse(-12, 5, Math.PI / 4);
+            createHouse(12, -5, -Math.PI * 0.75); createHouse(-12, -5, Math.PI * 0.75);
         }
 
         function createWater() {
-            const waterGeometry = new THREE.PlaneGeometry(200, 200);
-            const waterMaterial = new THREE.MeshStandardMaterial({
-                color: 0x5E84A1,
-                roughness: 0.1,
-                metalness: 0.5,
-                transparent: true,
-                opacity: 0.8
-            });
-
-            waterMesh = new THREE.Mesh(waterGeometry, waterMaterial);
-            waterMesh.rotation.x = -Math.PI / 2;
-            waterMesh.position.y = 0;
-            waterMesh.receiveShadow = true;
-            scene.add(waterMesh);
+            const waterMesh = new THREE.Mesh(new THREE.PlaneGeometry(200, 200), new THREE.MeshStandardMaterial({
+                color: 0x5E84A1, roughness: 0.1, metalness: 0.5, transparent: true, opacity: 0.8
+            }));
+            waterMesh.rotation.x = -Math.PI / 2; waterMesh.receiveShadow = true; scene.add(waterMesh);
         }
 
         function createEnvironment() {
-            // Improved Realistic Tree Generator
-            const trunkMat = new THREE.MeshStandardMaterial({ color: CONFIG.colors.woodDark, roughness: 1.0 });
-            const leavesMat = new THREE.MeshStandardMaterial({ 
-                color: CONFIG.colors.sakura, 
-                flatShading: true 
-            });
-            const leavesMatDark = new THREE.MeshStandardMaterial({ 
-                color: CONFIG.colors.sakuraDark, 
-                flatShading: true 
-            });
+            const trunkMat = new THREE.MeshStandardMaterial({ color: CONFIG.colors.woodDark });
+            const leavesMat = new THREE.MeshStandardMaterial({ color: CONFIG.colors.sakura, flatShading: true });
+            const leavesMatDark = new THREE.MeshStandardMaterial({ color: CONFIG.colors.sakuraDark, flatShading: true });
 
             const treeGen = () => {
                 const tree = new THREE.Group();
-                
-                // 1. Main Trunk (slightly twisted)
-                const trunkGeo = new THREE.CylinderGeometry(0.3, 0.5, 5, 7);
-                // Displace vertices slightly for organic look
-                const posAttribute = trunkGeo.attributes.position;
-                for (let i = 0; i < posAttribute.count; i++) {
-                    const y = posAttribute.getY(i);
-                    if(y > 0) {
-                        posAttribute.setX(i, posAttribute.getX(i) + (Math.random()-0.5)*0.3);
-                        posAttribute.setZ(i, posAttribute.getZ(i) + (Math.random()-0.5)*0.3);
-                    }
-                }
-                trunkGeo.computeVertexNormals();
-                
-                const trunk = new THREE.Mesh(trunkGeo, trunkMat);
-                trunk.position.y = 2.5;
-                tree.add(trunk);
+                const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.3, 0.5, 5, 7), trunkMat);
+                trunk.position.y = 2.5; tree.add(trunk);
 
-                // 2. Branches
-                const branchCount = 4;
-                for(let i=0; i<branchCount; i++) {
-                    const branchLength = 3 + Math.random() * 2;
-                    const branchGeo = new THREE.CylinderGeometry(0.1, 0.25, branchLength, 5);
-                    const branch = new THREE.Mesh(branchGeo, trunkMat);
-                    
-                    // Position at top of trunk
-                    branch.position.y = 4 + (Math.random() * 1);
-                    branch.rotation.z = (Math.PI / 3) + (Math.random() * 0.5); // Angle out
-                    branch.rotation.y = (Math.PI * 2 / branchCount) * i + (Math.random() * 0.5);
-                    
-                    // Move branch out so it connects
-                    branch.translateY(branchLength/2 - 0.5);
-                    
-                    tree.add(branch);
+                for(let i=0; i<4; i++) {
+                    const branch = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.25, 4, 5), trunkMat);
+                    branch.position.y = 4.5; branch.rotation.z = Math.PI / 3; 
+                    branch.rotation.y = (Math.PI * 2 / 4) * i; branch.translateY(1.5); tree.add(branch);
 
-                    // 3. Leaf Clusters attached to branches
-                    const clustersPerBranch = 3;
-                    for(let j=0; j<clustersPerBranch; j++) {
-                        const size = 0.8 + Math.random();
-                        const leafGeo = new THREE.DodecahedronGeometry(size, 0);
-                        const mat = Math.random() > 0.5 ? leavesMat : leavesMatDark;
-                        const leaf = new THREE.Mesh(leafGeo, mat);
-                        
-                        // Position along branch
-                        const t = (j+1) / clustersPerBranch; // 0 to 1 along branch
-                        leaf.position.copy(branch.position); // Start at branch center
-                        
-                        // Local offset logic is tricky without hierarchy, so we use simple offset
-                        // Calculate approximate tip position based on rotation
-                        const tipX = Math.sin(branch.rotation.y) * Math.sin(branch.rotation.z) * (branchLength * t);
-                        const tipY = Math.cos(branch.rotation.z) * (branchLength * t);
-                        const tipZ = Math.cos(branch.rotation.y) * Math.sin(branch.rotation.z) * (branchLength * t);
-
-                        leaf.position.x += tipX + (Math.random()-0.5);
-                        leaf.position.y += tipY + (Math.random()-0.5);
-                        leaf.position.z += tipZ + (Math.random()-0.5);
-                        
-                        leaf.castShadow = true;
+                    for(let j=0; j<3; j++) {
+                        const leaf = new THREE.Mesh(new THREE.DodecahedronGeometry(1 + Math.random(), 0), Math.random()>0.5?leavesMat:leavesMatDark);
+                        leaf.position.copy(branch.position); 
+                        leaf.position.x += (Math.random()-0.5)*3; leaf.position.y += (Math.random()-0.5)*3; leaf.position.z += (Math.random()-0.5)*3;
                         tree.add(leaf);
                     }
                 }
-
                 return tree;
             };
 
-            // Place trees around the complex
             for (let i = 0; i < 25; i++) {
                 const tree = treeGen();
-                const angle = (i / 25) * Math.PI * 2;
-                const radius = 20 + Math.random() * 15; // Distance from center
+                const angle = (i / 25) * Math.PI * 2; const radius = 20 + Math.random() * 15;
+                const tx = Math.cos(angle) * radius;
+                const tz = Math.sin(angle) * radius;
+                tree.position.set(tx, 0, tz);
+                tree.scale.setScalar(0.9 + Math.random() * 0.4); scene.add(tree);
                 
-                tree.position.x = Math.cos(angle) * radius;
-                tree.position.z = Math.sin(angle) * radius;
-                
-                // Variation
-                tree.rotation.y = Math.random() * Math.PI;
-                const scale = 0.9 + Math.random() * 0.4;
-                tree.scale.setScalar(scale);
-
-                scene.add(tree);
+                // Add tree to obstacles
+                obstacles.push({ x: tx, z: tz, r: 1.5 });
             }
-
-            // Add some rocks near water
+            
+            // Rocks
             const rockGeo = new THREE.DodecahedronGeometry(1, 0);
             const rockMat = new THREE.MeshStandardMaterial({ color: 0x555555 });
             for(let i=0; i<12; i++) {
                 const rock = new THREE.Mesh(rockGeo, rockMat);
                 const angle = Math.random() * Math.PI * 2;
                 const r = 15 + Math.random() * 5;
-                rock.position.set(Math.cos(angle)*r, 0.5, Math.sin(angle)*r);
+                const rx = Math.cos(angle)*r;
+                const rz = Math.sin(angle)*r;
+                rock.position.set(rx, 0.5, rz);
                 rock.scale.set(1.5 + Math.random(), 0.5 + Math.random()*0.5, 1.5+Math.random());
-                rock.castShadow = true;
                 scene.add(rock);
+                obstacles.push({ x: rx, z: rz, r: 2 });
             }
-        }
-
-        // --- Particle System (Sakura) ---
-
-        function createSakuraTexture() {
-            const canvas = document.createElement('canvas');
-            canvas.width = 32;
-            canvas.height = 32;
-            const ctx = canvas.getContext('2d');
-            
-            // Draw a simple petal shape
-            ctx.fillStyle = '#ffb7c5';
-            ctx.beginPath();
-            ctx.ellipse(16, 16, 8, 14, Math.PI/4, 0, Math.PI * 2);
-            ctx.fill();
-
-            const texture = new THREE.CanvasTexture(canvas);
-            return texture;
         }
 
         function createSakuraParticles() {
             const geometry = new THREE.BufferGeometry();
-            const positions = [];
-            const velocities = []; // Store random fall speeds
-            
-            for (let i = 0; i < CONFIG.particles; i++) {
-                const x = (Math.random() - 0.5) * 80;
-                const y = Math.random() * 50;
-                const z = (Math.random() - 0.5) * 80;
-                positions.push(x, y, z);
-                
-                velocities.push(
-                    (Math.random() - 0.5) * 0.05, // x sway
-                    -0.02 - Math.random() * 0.05, // y fall
-                    (Math.random() - 0.5) * 0.05  // z sway
-                );
-            }
+            const positions = [], velocities = [];
+            const canvas = document.createElement('canvas'); canvas.width = 32; canvas.height = 32;
+            const ctx = canvas.getContext('2d');
+            ctx.fillStyle = '#ffb7c5'; ctx.beginPath(); ctx.ellipse(16, 16, 8, 14, Math.PI/4, 0, Math.PI * 2); ctx.fill();
 
+            for (let i = 0; i < CONFIG.particles; i++) {
+                positions.push((Math.random()-0.5)*80, Math.random()*50, (Math.random()-0.5)*80);
+                velocities.push((Math.random()-0.5)*0.05, -0.02 - Math.random()*0.05, (Math.random()-0.5)*0.05);
+            }
             geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
             geometry.setAttribute('velocity', new THREE.Float32BufferAttribute(velocities, 3));
 
-            const material = new THREE.PointsMaterial({
-                color: CONFIG.colors.sakura,
-                size: 0.4,
-                map: createSakuraTexture(),
-                transparent: true,
-                opacity: 0.8,
-                depthWrite: false,
-                blending: THREE.AdditiveBlending
-            });
-
-            particleSystem = new THREE.Points(geometry, material);
+            particleSystem = new THREE.Points(geometry, new THREE.PointsMaterial({
+                color: CONFIG.colors.sakura, size: 0.4, map: new THREE.CanvasTexture(canvas),
+                transparent: true, opacity: 0.8, depthWrite: false, blending: THREE.AdditiveBlending
+            }));
             scene.add(particleSystem);
         }
 
-        function togglePetals() {
-            windSpeed = windSpeed === 1.0 ? 5.0 : 1.0;
-        }
+        // --- ALIEN LOGIC ---
+        function createAliens() {
+            const bodyMat = new THREE.MeshStandardMaterial({ color: CONFIG.colors.alienBody, emissive: 0x335533, roughness: 0.4 });
+            const eyeMat = new THREE.MeshStandardMaterial({ color: 0x000000, roughness: 0.1 });
 
-        function updateParticles() {
-            if (!particleSystem) return;
+            for(let i=0; i<12; i++) {
+                const alien = new THREE.Group();
+                const body = new THREE.Mesh(new THREE.SphereGeometry(0.3, 8, 8), bodyMat);
+                body.scale.set(1, 2.5, 1); body.position.y = 0.6; alien.add(body);
+                const head = new THREE.Mesh(new THREE.SphereGeometry(0.35, 12, 12), bodyMat);
+                head.position.y = 1.0; alien.add(head);
+                const leftEye = new THREE.Mesh(new THREE.SphereGeometry(0.06, 8, 8), eyeMat);
+                leftEye.position.set(0.15, 1.05, 0.25); alien.add(leftEye);
+                const rightEye = new THREE.Mesh(new THREE.SphereGeometry(0.06, 8, 8), eyeMat);
+                rightEye.position.set(-0.15, 1.05, 0.25); alien.add(rightEye);
 
-            const positions = particleSystem.geometry.attributes.position.array;
-            const velocities = particleSystem.geometry.attributes.velocity.array;
-
-            for (let i = 0; i < CONFIG.particles; i++) {
-                const i3 = i * 3;
-
-                // Apply Velocity
-                positions[i3] += velocities[i3] * windSpeed;     // X
-                positions[i3 + 1] += velocities[i3 + 1];         // Y
-                positions[i3 + 2] += velocities[i3 + 2] * windSpeed; // Z
-
-                // Wind Swirl (using sine wave based on time and height)
-                const time = clock.getElapsedTime();
-                positions[i3] += Math.sin(time * 0.5 + positions[i3 + 1]) * 0.002 * windSpeed;
-
-                // Reset if below water
-                if (positions[i3 + 1] < 0) {
-                    positions[i3 + 1] = 40 + Math.random() * 10; // Reset to top
-                    positions[i3] = (Math.random() - 0.5) * 80;
-                    positions[i3 + 2] = (Math.random() - 0.5) * 80;
+                // Find non-colliding start pos
+                let safe = false, count = 0;
+                while(!safe && count < 50) {
+                    const angle = Math.random() * Math.PI * 2;
+                    const dist = 25 + Math.random() * 20;
+                    const sx = Math.cos(angle)*dist;
+                    const sz = Math.sin(angle)*dist;
+                    if(checkCollision(sx, sz, 2)) { // Check logic
+                        alien.position.set(sx, 0, sz);
+                        safe = true;
+                    }
+                    count++;
                 }
+                if (!safe) alien.position.set(30, 0, 0);
+
+                scene.add(alien);
+
+                aliens.push({
+                    mesh: alien,
+                    state: 'WANDERING', 
+                    target: new THREE.Vector3(),
+                    targetDoorId: -1,
+                    velocity: new THREE.Vector3(),
+                    speed: 0.08 + Math.random() * 0.04,
+                    timer: 0,
+                    runOffset: Math.random() * 100,
+                    jumpProgress: 0,
+                    startJumpPos: new THREE.Vector3()
+                });
             }
-
-            particleSystem.geometry.attributes.position.needsUpdate = true;
         }
 
-        function onWindowResize() {
-            camera.aspect = window.innerWidth / window.innerHeight;
-            camera.updateProjectionMatrix();
-            renderer.setSize(window.innerWidth, window.innerHeight);
+        // Collision Check: Returns TRUE if SAFE, FALSE if colliding
+        function checkCollision(x, z, padding) {
+            for (let obs of obstacles) {
+                const dx = x - obs.x;
+                const dz = z - obs.z;
+                const distSq = dx*dx + dz*dz;
+                const minDist = obs.r + padding; // simple radius check
+                if (distSq < minDist * minDist) return false;
+            }
+            return true;
         }
+
+        function updateAliensAndDoors() {
+            // 1. Update Doors
+            doors.forEach(door => {
+                const target = door.requests > 0 ? 1 : 0;
+                door.openFactor += (target - door.openFactor) * 0.1;
+                const slideDist = 0.8 * door.openFactor;
+                door.left.position.z = 0.45 + slideDist;
+                door.right.position.z = -0.45 - slideDist;
+            });
+
+            // 2. Update Aliens
+            aliens.forEach(a => {
+                const pos = a.mesh.position;
+                const time = clock.getElapsedTime() + a.runOffset;
+
+                if (a.state === 'WANDERING') {
+                    // If near target or stuck or just random change
+                    if (pos.distanceTo(a.target) < 1 || a.target.lengthSq() === 0) {
+                        if (Math.random() < 0.01) { // Go to door
+                            a.state = 'APPROACHING';
+                            const door = doors[Math.floor(Math.random()*doors.length)];
+                            a.targetDoorId = door.id;
+                            a.target.copy(door.jumpSpotPos); // Go to jump spot
+                        } else {
+                            pickRandomTarget(a);
+                        }
+                    }
+                    
+                    // COLLISION AVOIDANCE WHILE MOVING
+                    // Look ahead
+                    const lookAhead = pos.clone().add(a.velocity.clone().normalize().multiplyScalar(2));
+                    if (!checkCollision(lookAhead.x, lookAhead.z, 0.5)) {
+                        // Turn back / Bounce
+                        a.velocity.negate();
+                        pickRandomTarget(a);
+                        // Ensure target is safe
+                        let safe = false, tries = 0;
+                        while(!safe && tries < 10) {
+                            if(checkCollision(a.target.x, a.target.z, 1)) safe = true;
+                            else pickRandomTarget(a);
+                            tries++;
+                        }
+                    }
+                    
+                    moveAlien(a, time);
+                }
+                else if (a.state === 'APPROACHING') {
+                    if (pos.distanceTo(a.target) < 1.0) {
+                        a.state = 'PREPARING_JUMP';
+                        a.startJumpPos.copy(pos);
+                        const door = doors[a.targetDoorId];
+                        a.target.copy(door.platformSpotPos); // Target is UP on platform
+                        a.jumpProgress = 0;
+                    } else {
+                        moveAlien(a, time);
+                    }
+                }
+                else if (a.state === 'PREPARING_JUMP') {
+                    // Crouch or pause briefly
+                    a.mesh.scale.y = 0.8; // Squish
+                    a.jumpProgress += 0.05;
+                    if(a.jumpProgress > 1) {
+                         a.state = 'JUMPING_UP';
+                         a.mesh.scale.y = 1.0;
+                         a.jumpProgress = 0;
+                    }
+                }
+                else if (a.state === 'JUMPING_UP') {
+                    // Parabolic arc
+                    a.jumpProgress += 0.03; // Jump speed
+                    if (a.jumpProgress >= 1) {
+                        a.state = 'WAITING_ENTRY';
+                        a.mesh.position.copy(a.target); // Snap to target
+                        // Request Door Open
+                        const door = doors[a.targetDoorId];
+                        door.requests++;
+                    } else {
+                        // Lerp position X/Z
+                        const t = a.jumpProgress;
+                        a.mesh.position.lerpVectors(a.startJumpPos, a.target, t);
+                        // Arc Y: simple quadratic
+                        // Start Y=0, End Y=2. Max height = 3.5
+                        const height = 4.0; 
+                        // Parabola: 4 * h * x * (1-x) + lerp(y0, y1, x)
+                        const baseY = (1-t)*0 + t*2;
+                        const arc = 4 * (height - 2) * t * (1-t); // simplistic arc
+                        a.mesh.position.y = baseY + arc;
+                    }
+                }
+                else if (a.state === 'WAITING_ENTRY') {
+                    const door = doors[a.targetDoorId];
+                    if (door.openFactor > 0.8) {
+                        a.state = 'ENTERING';
+                        a.target.copy(door.insidePos);
+                    }
+                }
+                else if (a.state === 'ENTERING') {
+                    if (pos.distanceTo(a.target) < 0.2) {
+                        a.state = 'INSIDE';
+                        a.timer = 200 + Math.random() * 200;
+                        a.mesh.visible = false;
+                        const door = doors[a.targetDoorId];
+                        door.requests--;
+                    } else {
+                        // Walk flat on platform
+                        const dir = new THREE.Vector3().subVectors(a.target, pos).normalize();
+                        pos.add(dir.multiplyScalar(a.speed));
+                        a.mesh.lookAt(a.target);
+                    }
+                }
+                else if (a.state === 'INSIDE') {
+                    a.timer--;
+                    if (a.timer <= 0) {
+                        a.mesh.visible = true;
+                        a.state = 'WAITING_EXIT';
+                        const door = doors[a.targetDoorId];
+                        door.requests++;
+                        // Snap to inside pos just in case
+                        a.mesh.position.copy(door.insidePos);
+                        a.target.copy(door.platformSpotPos); // Walk out to platform edge
+                    }
+                }
+                else if (a.state === 'WAITING_EXIT') {
+                    const door = doors[a.targetDoorId];
+                    if (door.openFactor > 0.8) {
+                        a.state = 'EXITING_PLATFORM';
+                    }
+                }
+                else if (a.state === 'EXITING_PLATFORM') {
+                     if (pos.distanceTo(a.target) < 0.2) {
+                        a.state = 'JUMPING_DOWN';
+                        a.startJumpPos.copy(pos);
+                        // Target ground slightly away
+                        const door = doors[a.targetDoorId];
+                        a.target.copy(door.jumpSpotPos); 
+                        a.jumpProgress = 0;
+                        // Release door immediately so it closes behind
+                        door.requests--;
+                     } else {
+                        const dir = new THREE.Vector3().subVectors(a.target, pos).normalize();
+                        pos.add(dir.multiplyScalar(a.speed));
+                        a.mesh.lookAt(a.target);
+                     }
+                }
+                else if (a.state === 'JUMPING_DOWN') {
+                    a.jumpProgress += 0.03;
+                    if (a.jumpProgress >= 1) {
+                        a.state = 'WANDERING';
+                        a.mesh.position.copy(a.target);
+                        a.mesh.position.y = 0; // Ensure ground
+                        pickRandomTarget(a);
+                    } else {
+                        const t = a.jumpProgress;
+                        a.mesh.position.lerpVectors(a.startJumpPos, a.target, t);
+                        const baseY = (1-t)*2 + t*0; // From 2 down to 0
+                        const arc = 2 * t * (1-t); // Small hop down
+                        a.mesh.position.y = baseY + arc;
+                    }
+                }
+            });
+        }
+
+        function pickRandomTarget(a) {
+            const angle = Math.random() * Math.PI * 2;
+            const dist = 20 + Math.random() * 20;
+            a.target.set(Math.cos(angle)*dist, 0, Math.sin(angle)*dist);
+        }
+
+        function moveAlien(a, time) {
+            const pos = a.mesh.position;
+            const dir = new THREE.Vector3().subVectors(a.target, pos).normalize();
+            // Store velocity for reflection later
+            a.velocity.copy(dir);
+            
+            pos.add(dir.multiplyScalar(a.speed));
+            a.mesh.lookAt(a.target);
+            // Bobbing animation
+            a.mesh.position.y = Math.abs(Math.sin(time * 15)) * 0.2;
+        }
+
+
+        function togglePetals() { windSpeed = windSpeed === 1.0 ? 5.0 : 1.0; }
+        function onWindowResize() { camera.aspect = window.innerWidth/window.innerHeight; camera.updateProjectionMatrix(); renderer.setSize(window.innerWidth, window.innerHeight); }
 
         function animate() {
-            requestAnimationFrame(animate);
-            controls.update();
-            updateParticles();
+            requestAnimationFrame(animate); controls.update();
+            updateAliensAndDoors(); // NEW: Update logic
+            
+            if (particleSystem) {
+                const pos = particleSystem.geometry.attributes.position.array;
+                const vel = particleSystem.geometry.attributes.velocity.array;
+                const time = clock.getElapsedTime();
+                for (let i = 0; i < CONFIG.particles; i++) {
+                    const i3 = i * 3;
+                    pos[i3] += vel[i3] * windSpeed + Math.sin(time * 0.5 + pos[i3 + 1]) * 0.002 * windSpeed;
+                    pos[i3 + 1] += vel[i3 + 1];
+                    pos[i3 + 2] += vel[i3 + 2] * windSpeed;
+                    if (pos[i3 + 1] < 0) { pos[i3 + 1] = 40 + Math.random() * 10; pos[i3] = (Math.random()-0.5)*80; pos[i3+2] = (Math.random()-0.5)*80; }
+                }
+                particleSystem.geometry.attributes.position.needsUpdate = true;
+            }
             renderer.render(scene, camera);
         }
 
-        // Initialize application
         init();
-
     </script>
 </body>
 </html>
